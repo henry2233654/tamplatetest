@@ -1,6 +1,421 @@
+--#ENDPOINT PUT /user/{email}
+local ret = User.createUser({
+  email = request.parameters.email,
+  name = request.parameters.email,
+  password = request.body.password
+})
+if ret.status ~= nil then
+  response.code = ret.status
+  response.message = tostring(from_json(ret.error).message)
+else
+  local domain = string.gsub(request.uri, 'https?://(.-/)(.*)', '%1')
+  local text = "Hi " .. request.parameters.email .. ",\n"
+  text = text .. "Click this link to verify your account:\n"
+  text = text .. "https://" .. domain .. "verify/" .. ret;
+  Email.send({
+    from = 'Sample App <mail@exosite.com>',
+    to = request.parameters.email,
+    subject = ("Signup on " .. domain),
+    text = text
+  })
+end
+--#ENDPOINT GET /verify/{code}
+local ret = User.activateUser({code = request.parameters.code})
+if ret == 'OK' then
+  response.headers["Content-type"] = "text/html"
+  response.message = '<html><head></head><body>Signed up successfully. <a href="/#/login">Log in</a></body></html>'
+else
+  response.message = 'Sign up failed. Error: ' .. ret.message
+end
+--#ENDPOINT PATCH /user/{email}
+local user = currentUser(request)
+if user ~= nil then
+  User.updateUserStorage({id = user.id, ["key values"] = request.body})
+  User.createUserStorage({id = user.id, ["key values"] = request.body})
+end
+--#ENDPOINT POST /session
+local ret = User.getUserToken({
+  email = request.body.email,
+  password = request.body.password
+})
+if ret ~= nil and ret.status_code ~= nil then
+  response.code = ret.status_code
+  response.message = ret.message
+else
+  response.headers = {
+    ["Set-Cookie"] = "sid=" .. tostring(ret)
+  }
+  response.message = {["token"] = ret}
+end
+--#ENDPOINT GET /session
+--
+local user = currentUser(request)
+if user ~= nil and user.id ~= nil then
+    return user
+end
+response.code = 400
+response.message = "Session invalid"
+--#ENDPOINT POST /user/{email}/lightbulbs
+-- Claim a lightbulb with a user's account
+-- Lightbulb must have already written in to the platform
+-- and not been claimed by someone else.
+local sn = tostring(request.body.serialnumber);
+local link = request.body.link;
+local name = request.body.name
+local user = currentUser(request)
+
+if user == nil or user.id == nil then
+  http_error(403, response)
+  return
+end
+
+-- only add device if the Product event handler has 
+-- heard from it (see event_handler/product.lua)
+device = kv_read(sn)
+if device == nil then
+  http_error(404, response)
+  return  
+end
+
+local owners = User.listRoleParamUsers({
+  role_id = "owner",
+  parameter_name = "sn",
+  parameter_value = sn
+})
+
+function set_device_name(device, name)
+  device.name = name
+  kv_write(sn, device)
+end
+
+if link == true then
+  if #owners == 0 then
+    local resp = User.assignUser({
+      id = user.id,
+      roles = {{
+        role_id = "owner",
+        parameters = {{
+          name = "sn",
+          value = sn
+        }}
+      }}
+    })
+    if resp.code == nil then
+      -- success, set name and return updated role
+      set_device_name(device, name)
+      response.message = "Ok"
+      response.code = 200
+    else
+      -- error
+      response.message = resp.message
+      response.code = resp.code
+    end
+  else
+    response.message = "Conflict"
+    response.code = 409
+    return
+  end
+elseif link == false then
+  local is_owner = false
+  for i, owner_id in ipairs(owners) do
+    if owner_id == user.id then
+      is_owner = true
+      break
+    end
+  end
+  if is_owner == false then
+    response.message = "Conflict"
+    response.code = 409
+    return
+  else
+    local guests = User.listRoleParamUsers({
+      role_id = "guest",
+      parameter_name = "sn",
+      parameter_value = sn
+    })
+    for i, guest in ipairs(guests) do
+      User.deassignUserParam({
+        id = guest,
+        role_id = "guest",
+        parameter_name = "sn",
+        parameter_value = sn
+      })
+    end
+    User.deassignUserParam({
+      id = user.id,
+      role_id = "owner",
+      parameter_name = "sn",
+      parameter_value = sn
+    })
+
+    -- save application-specific data associated with
+    -- device here
+    set_device_name(device, name)
+    response.message = "Added lightbulb"
+    response.code = 200
+  end
+else
+  response.message = "Conflict"
+  response.code = 409
+end
+
+--#ENDPOINT GET /user/{email}/lightbulbs
+-- Get a list of lightbulbs associated with user with email {email}
+local user = currentUser(request)
+if user ~= nil then
+  local list = {}
+  local roles = User.listUserRoles({id = user.id})
+  for _, role in ipairs(roles) do
+    for _, parameter in ipairs(role.parameters) do
+      if parameter.name == "sn" then
+        local device_info = kv_read(parameter.value)
+        if device_info == nil then
+          print("device_info returned from kv_read is nil in " .. 
+            "GET /user/{email}/lightbulbs for sn " .. parameter.value)
+        else
+          if role.role_id == "owner" then
+            device_info.type = "full"
+          else
+            device_info.type = "readonly"
+          end
+          -- default so webapp doesn't choke before state is really set
+          if device_info.state == nil then
+            device_info.state = 0
+          end
+          device_info.serialnumber = parameter.value
+          table.insert(list, device_info)
+        end
+      end
+    end
+  end
+  response.headers["Content-type"] = "application/json; charset=utf-8"
+  if table.getn(list) == 0 then
+    return '[]'
+  else
+    return list
+  end
+else
+  http_error(403, response)
+end
+--#ENDPOINT GET /user/{email}
+local user = currentUser(request)
+if user ~= nil and user.email == request.parameters.email then
+  return User.listUserData({id = user.id})
+else
+  http_error(403, response)
+end
+--#ENDPOINT POST /user/{email}/shared/
+local sn = tostring(request.body.serialnumber)
+local user = currentUser(request)
+if user ~= nil then
+  local isowner = User.hasUserRoleParam({
+    id = user.id,
+    role_id = "owner",
+    parameter_name = "sn",
+    parameter_value = sn
+  })
+  if 'OK' == isowner then
+    local guest = User.listUsers({filter = "email::like::" .. request.parameters.email})
+    if #guest == 1 and guest[1].id ~= nil then
+      local resp = User.assignUser({
+        id = guest[1].id,
+        roles = {{
+          role_id = "guest",
+          parameters = {{
+            name = "sn",
+            value = sn
+          }}
+        }}
+      });
+      return {"ok", resp}
+    else
+      return {"error", "user not found"}
+    end
+  end
+end
+http_error(403, response)
+--#ENDPOINT DELETE /user/{email}/shared/{sn}
+local sn = request.parameters.sn
+local user = currentUser(request)
+if user ~= nil then
+  local isowner = User.hasUserRoleParam({
+    id = user.id, role_id = "owner", parameter_name = "sn", parameter_value = sn
+  })
+  if isowner == 'OK' then
+    local guestusers = User.listRoleParamUsers({
+      role_id = "guest", parameter_name = "sn", parameter_value = sn
+    })
+    if guestusers ~= nil then
+      for _, guestid in ipairs(guestusers) do
+        local guest = User.getUser({id=guestid})
+        if guest.email == request.parameters.email then
+          local result = User.deassignUserParam({
+            id = guest.id, role_id = "guest", parameter_name = "sn", parameter_value = sn
+          })
+          return result
+        end
+      end
+    end
+  end
+end
+http_error(403, response)
+--#ENDPOINT GET /user/{email}/shared/
+local user = currentUser(request)
+if user ~= nil then
+  if user.email ~= request.parameters.email then
+    http_error(403, response)
+  else
+    local roles = User.listUserRoles({id=user.id})
+    local list = {}
+    for _, role in ipairs(roles) do
+      if role.role_id == "owner" then
+        for _, parameter in ipairs(role.parameters) do
+          if parameter.name == "sn" then
+            local sn = parameter.value
+            local user_info = {serialnumber=sn, email=user.email, type="full"}
+            table.insert(list, user_info)
+            local guestusers = User.listRoleParamUsers({
+              role_id = "guest", parameter_name = "sn", parameter_value = parameter.value
+            })
+            if guestusers ~= nil then
+              for _, guestid in ipairs(guestusers) do
+                local guest = User.getUser({id=guestid})
+                local guest_info = {serialnumber=sn, email=guest.email, type="readonly"}
+                table.insert(list, guest_info)
+              end
+            end
+          end
+        end
+      end
+    end
+    return list
+  end
+end
+http_error(403, response)
+--#ENDPOINT POST /lightbulb/{sn}
+-- write to one or more resources of lightbulb with serial number {sn}
+-- Expects JSON object containing one or more properties in 
+-- "state" | "humidity" | "temperature" with the values to be set.
+-- E.g. {"state": 1} to turn the lightbulb on
+local sn = tostring(request.parameters.sn)
+local user = currentUser(request)
+if user ~= nil then
+  local isowner = User.hasUserRoleParam({
+    id = user.id, role_id = "owner", parameter_name = "sn", parameter_value = sn
+  })
+  if isowner == 'OK' then
+    -- allow the owner to write these resources
+    local message = {}
+    for _, alias in ipairs({"state", "humidity", "temperature"}) do
+      if request.body[alias] ~= nil then
+        local ret = device_write(sn, alias, request.body[alias])
+        if ret.status ~= nil and ret.status ~= "ok" then
+          table.insert(message, {alias = alias, status = ret.status})
+        end
+      end
+    end
+    response.code = 200
+    response.message = table.getn(message) ~= 0 and  message or ""
+  else
+    http_error(403, response)
+  end
+else
+  http_error(403, response)
+end
+
+--#ENDPOINT GET /lightbulb/{sn}
+-- get details about a particular lightbulb
+local sn = tostring(request.parameters.sn)
+local user = currentUser(request)
+if user ~= nil then
+  local isowner = User.hasUserRoleParam({
+    id = user.id, role_id = "owner", parameter_name = "sn", parameter_value = sn
+  })
+  local isguest = User.hasUserRoleParam({
+    id = user.id, role_id = "guest", parameter_name = "sn", parameter_value = sn
+  })
+  if isowner == 'OK' or isguest == 'OK' then
+    return kv_read(sn)
+  else
+    http_error(403, response)
+  end
+else
+  http_error(403, response)
+end
+--#ENDPOINT GET /lightbulb/{sn}/alert
+local alerts = {}
+local value = kv_read(request.parameters.sn)
+if value.alerts ~= nil then
+  alerts = value.alerts
+end
+for _, alert in ipairs(alerts) do
+  alert.timer_id = nil
+  alert.timer_running = nil
+end
+return to_json(alerts)
+--#ENDPOINT DELETE /lightbulb/{sn}/alert
+local sn = request.parameters.sn
+if not (request.body.state and request.body.timer) then
+  http_error(400, response)
+  return
+end
+local value = kv_read(sn)
+if value.alerts ~= nil then
+  local alert = value.alerts[1]
+  if alert ~= nil and request.body.state == alert.state and request.body.timer == alert.timer then
+    alert = nil
+  end
+end
+kv_write(sn, value)
+response.code = 204
+--#ENDPOINT POST /lightbulb/{sn}/alert
+--{state:on, timer:5, email:user, active:true, message=""}
+if not (
+  request.body.state and request.body.timer and
+  request.body.active and request.body.email and
+  request.body.message
+) then
+  http_error(400, response)
+  return
+end
+local sn = request.parameters.sn
+local timerid = sn .. "_state"
+local value = kv_read(sn)
+local req_alert = {
+  state = request.body.state,
+  timer = request.body.timer,
+  active = request.body.active,
+  email = request.body.email,
+  message = request.body.message,
+  timer_running = false
+}
+if value.state ~= nil and value.state == request.body.state then -- condition true
+  if value.alerts ~= nil then
+    for _ ,alert in ipairs(value.alerts) do
+      if request.body.active and not alert.timer_running then --enabled, not running
+        trigger(req_alert, timerid)
+      end
+      if not request.body.active and alert.timer_running then --disabled, running
+        cancel_trigger(alert)
+      end
+    end
+  else -- no existing alert
+    if request.body.active then
+      trigger(req_alert, timerid)
+    end
+  end
+end
+value.alerts = {req_alert}
+kv_write(sn, value)
+--#ENDPOINT GET /debug-command/{cmd}
+response.message = debug(request.parameters.cmd)
+--#ENDPOINT WEBSOCKET /debug
+response.message = debug(websocket_info.message)
+--#ENDPOINT WEBSOCKET /listen
+response.message = listen(websocketInfo)
 --#ENDPOINT GET /_init
-local ret1 = User.createRole({role_id = "engineer", parameter = {{name = "sn"}}})
-local ret2 = User.createRole({role_id = "normal", parameter = {{name = "sn"}}})
+local ret1 = User.createRole({role_id = "owner", parameter = {{name = "sn"}}})
+local ret2 = User.createRole({role_id = "guest", parameter = {{name = "sn"}}})
 local ret = ret1.status_code ~= nil and ret1 or nil
 if ret == nil then
   ret = ret2.status_code ~= nil and ret2 or nil
@@ -11,387 +426,16 @@ if ret ~= nil then
 else
   response.code = 200
 end
---#ENDPOINT GET /keystore
-obj = Keystore.list()
-if (next(obj["keys"])) ~= nil then
-  return to_json(obj)
-else
-  return "no key found"
-end
---#ENDPOINT PUT /keystore/{key}
-obj = Keystore.get({key=request.parameters.key})
-if next(obj) == nil then
-  response.message = "add a new one"
-else
-  response.message = "key existed,update now"
-end
-ret = Keystore.set({key=request.parameters.key, value=request.body.value})
---#ENDPOINT PATCH /keystore/{key}
-obj = Keystore.get({key=request.parameters.key})
-if next(obj) ~= nil then
-  response.message = "key is existing,update..."
-  Keystore.set({key=request.parameters.key, value=request.body.value})
-else
-  response.message = "key not found"
-  return
-end
---#ENDPOINT DELETE /keystore/{key}
-obj = Keystore.get({key=request.parameters.key})
-if next(obj) == nil then
-  response.message = "key is not existing"
-else
-  response.message = "key is existing,delete now"
-  Keystore.delete({key=request.parameters.key})
-end
---#ENDPOINT POST /keystore/{key}
-Keystore.set({key=request.parameters.key,
-              value=request.body.value})
---#ENDPOINT GET /cpu/{times}
---limited number of 64000 instructions per execution
-times = request.parameters.times
-for i=0,times do
-end
---#ENDPOINT GET /memory/memory/{times}
---memory usage limits of 1Mb
-times = request.parameters.times
-str = "abc"
-for i=0,times do
-  str = str .. str
-end
---#ENDPOINT GET /memory/notover/1MB
-tb = {}
-for i=0,math.pow(2, 13) do
-  --31 of \65
-  table.insert(tb,"\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65")
-end
-str = table.concat(tb,nil)
---#ENDPOINT GET /memory/over/1MB
-tb = {}
-for i=0,math.pow(2, 13) do
-  --32 of \65
-  table.insert(tb,"\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65\65")
-end
-str = table.concat(tb,nil)
---#ENDPOINT GET /debug
---include all invalid lua function which is nil type
-return (type(debug) == 'nil')
---#ENDPOINT GET /debug/{functionName}
-functionName = request.parameters.functionName
-if functionName == "debug" then
-  return (type(debug.debug) == "nil")
-elseif functionName == "getfenv" then
-  return (type(debug.getfenv) == "nil")
-elseif functionName == "gethook" then
-  return (type(debug.gethook) == "nil")
-elseif functionName == "getinfo" then
-  return (type(debug.getinfo) == "nil")
-elseif functionName == "getlocal" then
-  return (type(debug.getlocal) == "nil")
-elseif functionName == "getmetatable" then
-  return (type(debug.getmetatable) == "nil")
-elseif functionName == "getregistry" then
-  return (type(debug.getregistry) == "nil")
-elseif functionName == "getupvalue" then
-  return (type(debug.getupvalue) == "nil")
-elseif functionName == "setfenv" then
-  return (type(debug.setfenv) == "nil")
-elseif functionName == "sethook" then
-  return (type(debug.sethook) == "nil")
-elseif functionName == "setlocal" then
-  return (type(debug.setlocal) == "nil")
-elseif functionName == "setmetatable" then
-  return (type(debug.setmetatable) == "nil")
-elseif functionName == "setupvalue" then
-  return (type(debug.setupvalue) == "nil")
-elseif functionName == "traceback" then
-  return (type(debug.traceback) == "nil")
-end
---#ENDPOINT GET /string/{functionName}
-functionName = request.parameters.functionName
-if functionName == "byte" then
-  return tostring(string.byte("0",1,1))
-elseif functionName == "char" then
-  return string.char(49)
-elseif functionName == "find" then
-  local a,b = string.find("this is a message","is")
-  return a .. " " .. b
-elseif functionName == "format" then
-  PI = "3.1415932545334"
-  return string.format("pi=%.2f", PI)
-elseif functionName == "gmatch" then
-  data = ""
-  s = "abcd"
-  for w in string.gmatch(s, "%a") do
-    data = data .. w .. " "
-  end
-  return data
-elseif functionName == "gsub" then
-  print(string.gsub("banana", "a", "A", 4))
-elseif functionName == "len" then
-  return string.len("123456789")
-elseif functionName == "lower" then
-  return string.lower("AaBbCc123")
-elseif functionName == "match" then
-  return string.match("abcdefg", "a")
-elseif functionName == "rep" then
-  return string.rep("a", 3," " )
-elseif functionName == "reverse" then
-  response.message = string.reverse("abc")
-elseif functionName == "sub" then
-  response.message = string.sub("abcdefg", 3 ,6)
-elseif functionName == "upper" then
-  response.message = string.upper("AaBbCc")
-elseif functionName == "dump" then
-    return (type(string.dump) == 'nil')
-end
---#ENDPOINT GET /os/{functionName}
-functionName = request.parameters.functionName
-if functionName == "execute" then
-  return (type(os.execute) == "nil")
-elseif functionName == "exit" then
-  return (type(os.exit) == "nil")
-elseif functionName == "getenv" then
-  return (type(os.getenv) == "nil")
-elseif functionName == "remove" then
-  return (type(os.remove) == "nil")
-elseif functionName == "rename" then
-  return (type(os.rename) == "nil")
-elseif functionName == "setlocale" then
-  return (type(os.setlocale) == "nil")
-elseif functionName == "tmpname" then
-  return (type(os.tmpname) == "nil")
-elseif functionName == "clock" then
-  return os.clock ()
-elseif functionName == "date" then
-  return os.date ("%c",os.time{year=1970, month=1, day=1, hour=0, sec=1},os.time{year=1970, month=1, day=1, hour=0})
-elseif functionName == "difftime" then
-  return os.difftime(os.time{year=1970, month=1, day=1, hour=0, sec=1},os.time{year=1970, month=1, day=1, hour=0})
-elseif functionName == "time" then
-  return os.time{year=1970, month=1, day=1, hour=0, sec=1}
-end
---#ENDPOINT GET /basic/{functionName}
-functionName = request.parameters.functionName
-if functionName == "_G" then
-  local data = ""
-  _G["test"] = "test"
-  for key, value in pairs(_G) do
-    data = data .. key .. ": " .. tostring(value) .. "\n"
-  end
-  return data
-elseif functionName == "getfenv" then
-  getfenv()
-elseif functionName == "getmetatable" then
-  local s = "hello world!"
-  return tostring(getmetatable (s))
-elseif functionName == "ipairs" then
-  local data = ""
-  local t = {"one", "two", "three"}
-  for i, v in ipairs(t) do
-    data = data .. i .. " " .. tostring(v) .. " "
-  end
-  return data
-elseif functionName == "next" then
-  local data = ""
-  local t = {"one", "two", "three"}
-  data = tostring(next(t ,i)) .. " "
-  for i=1,3 do
-    data = data .. tostring(next(t ,i)) .. " "
-  end
-  return data
-elseif functionName == "pairs" then
-  local data = ""
-  local t = {"one", "two", "three"}
-  for k,v in pairs(t) do
-    data = data .. k .. " " .. tostring(v) .. " "
-  end
-  return data
-elseif functionName == "rawequal" then
-  local data =""
-  data = tostring(rawequal (1, 1)) .. " " .. tostring(rawequal (1, 0))
-  return data
-elseif functionName == "rawget" then
-  local data = ""
-  local t = {"one", "two", "three"}
-  for i=1,3 do
-    data = data .. rawget (t, i) .. " "
-  end
-  return data
-elseif functionName == "rawset" then
-  local data = ""
-  local t = {"one", "two", "three"}
-  rawset (t, 1, "I")
-  for i=1,3 do
-    data = data .. t[i] .. " "
-  end
-  return data
-elseif functionName == "select" then
-  return select("#", 1,2,3,4,5,6,7,8)
-elseif functionName == "setfenv" then
-  setfenv(1, {})
-elseif functionName == "setmetatable" then
-  a = {1,2}
-  b = {3,4}
-  c ={}
-  c.__add = function(op1, op2)
-  for _, item in ipairs(op2) do
-    table.insert(op1, item)
-  end
-  return op1
-  end
-  setmetatable(a, c)
-  t = a+b
-  response.message = table.concat(t," ")
-elseif functionName == "tonumber" then
-  return tonumber("1111",2)
-elseif functionName == "tostring" then
-  return tostring(1)
-elseif functionName == "type" then
-  local data = ""
-  local t = {nil,123,"123",true,{1,2,3}}
-  for i=1,5 do
-    data = data .. type(t[i]) .. " "
-  end
-  return data
-elseif functionName == "unpack" then
-  local a,b,c = unpack({1,2,3})
-  response.message = a .. " " .. b .. " " .. c
-elseif functionName == "_VERSION" then
-  return _VERSION
-elseif functionName == "pcall" then
-  local status, err = pcall(function () error({code=121}) end)
-  return err.code
-elseif functionName == "xpcall" then
-  function myfunction ()
-     n = n/nil
-  end
-  function myerrorhandler( err )
-     print( "ERROR:", err )
-  end
-  status = xpcall( myfunction, myerrorhandler )
-  return status
-elseif functionName == "import" then
---include all invalid lua function which is nil type
-    return (type(import) == 'nil')
-elseif functionName == "gc" then
---if gc can be used, it will return how many Ram have been used
-    response.message = collectgarbage("count")*100
-elseif functionName == "dofile" then
---if file is not existing,it will throw error message
-    dofile("doesnt_exist.doesnt_exist")
-elseif functionName == "load" then
---a should be 100 after excuting load function
-    load(function() a=100 end)()
-    response.message = a
-elseif functionName == "loadfile" then
---if loadfile failed,res will be nil and an error message
-    res,err = loadfile("doesnt_exist")
-    response.message = err
-elseif functionName == "loadstring" then
---a should be 100 after excuting loadstring function
-    loadstring("a = 100")()
-    response.message = a
-elseif functionName == "require" then
-    return type(require) == 'nil'
-elseif functionName == "error" then
-    error ("this is the message" ,1)
-elseif functionName == "assert" then
-    assert (false ,"this is the message")
-end
---#ENDPOINT GET /math/{functionName}
-functionName = request.parameters.functionName
-if functionName == "abs" then
-  response.message = math.abs(-1)
-elseif functionName == "acos" then
-  response.message = math.acos(1)
-elseif functionName == "asin" then
-  response.message = math.asin(0)
-elseif functionName == "atan" then
-  local c, s = math.cos(0.8), math.sin(0.8)
-  response.message = math.atan(s/c)
-elseif functionName == "atan2" then
-  return math.atan2 (1, 1)
-elseif functionName == "ceil" then
-  response.message = math.ceil(0.378)
-elseif functionName == "cos" then
-  response.message = math.cos(0)
-elseif functionName == ".cosh" then
-  return math.cosh (1)
-elseif functionName == "deg" then
-  response.message = math.deg(0)
-elseif functionName == "exp" then
-  response.message = math.exp(0)
-elseif functionName == "floor" then
-  response.message = math.floor(1.378)
-elseif functionName == "fmod" then
-  response.message = math.fmod(7, 3)
-elseif functionName == "frexp" then
-  return math.frexp (1)
-elseif functionName == "huge" then
-  if math.huge > 1000000000000000000000 then
-    response.message = "ture"
-  else
-    response.message = "fales"
-  end
-elseif functionName == "ldexp" then
-  response.message = math.ldexp (1, 1)
-elseif functionName == "log" then
-  response.message = math.log(math.exp(3))
-elseif functionName == "log10" then
-  response.message = math.log10 (10)
-elseif functionName == "max" then
-  response.message = math.max(1,2,3,4,5,6,7,8,9,10)
-elseif functionName == "min" then
-  response.message = math.min(1,2,3,4,5,6,7,8,9,10)
-elseif functionName == "modf" then
-  local div, rem = math.modf(5)
-  response.message = div .. " " .. rem
-elseif functionName == "pi" then
-  response.message = math.pi
-elseif functionName == "pow" then
-  response.message = math.pow (10, 3)
-elseif functionName == "rad" then
-  response.message = math.rad(180)
-elseif functionName == "random" then
-  response.message = math.random(1,10)
-elseif functionName == "randomseed" then
-  math.randomseed (os.time())
-  response.message = math.random(1,10)
-elseif functionName == "sin" then
-  response.message = math.sin(0)
-elseif functionName == "sinh" then
-  response.message = math.sinh (0)
-elseif functionName == "sqrt" then
-  response.message = math.sqrt (4)
-elseif functionName == "tan" then
-  response.message = math.tan (0)
-elseif functionName == "tanh" then
-  response.message = math.tanh (0)
-end
---#ENDPOINT GET /table/{functionName}
-functionName = request.parameters.functionName
-if functionName == "concat" then
-  local t = {"1","2","3","4","5"}
-  response.message = table.concat(t, " ", 2, 4)
-elseif functionName == "insert" then
-  local t = {"1","2","3"}
-  table.insert(t, 2, "two")
-  response.message = table.concat(t)
-elseif functionName == "maxn" then
-  t = {1,2,3,4,5,6,7,9,8}
-  response.message = table.maxn (t)
-elseif functionName == "remove" then
-  local t = {"1","2","3"}
-  table.remove(t,2)
-  response.message = table.concat(t)
-elseif functionName == "sort" then
-  t = { 3,2,5,1,4 }
-  table.sort(t, function(a,b) return a<b end)
-  response.message = table.concat(t)
-end
---#ENDPOINT GET /cause/error
-local data = {
-  ["request_id"] = "wsRid",
-  ["server_ip"] = "wsSip",
-  message = "wsMsg"
+--#ENDPOINT GET /tsdb/query/{sn}/{alias}
+local metrics = {
+  request.parameters.alias
 }
-return Websocket.send(data)
+local tags = {
+  sn = request.parameters.sn
+}
+local out = Tsdb.query({
+  metrics = metrics,
+  tags = tags
+})
+response.message = out
+

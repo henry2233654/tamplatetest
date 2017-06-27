@@ -1,9 +1,37 @@
-Testing Example
+Home Automation Example App
 ==================
 
-Write robot test verify below Items
+This application is written as a React app with Murano Solution event handlers, routes, modules and static assets.
 
-    Verify custom api and the api doc
-    Verify role
-    Verify services
-    Verify the example web
+
+Using This Example
+------------------
+
+Clone this repository.
+
+```
+git clone git@github.com:exosite/home-automation-example.git
+cd home-automation-example
+```
+
+To deploy the application, first install the [Murano command line tool](http://http://docs.exosite.com/development/tools/murano-cli/). Then initialize the Project with your Application and Product id using the `init` option and deploy with `syncup`.
+
+To build the application, install build tools using `npm install`. The minimum node version we're supporting is 0.12.x.  If you have a lower version you'll encounter errors while running `npm install`.
+
+After installing the packages, compile the application.
+
+```
+npm run compile
+```
+
+To run the web application static assets locally, create a .env file in the root of the project with your solution URL, like this:
+
+```
+API_BASE_URL=https://<solution-name>.apps.exosite.io
+```
+
+Then run this and go to http://localhost:8080 in your browser.
+
+```
+npm run start:dev
+```

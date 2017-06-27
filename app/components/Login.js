@@ -25,9 +25,11 @@ const Login = ({ errorText, isAuthenticating, onSubmit }) => (
     <main className="container container--small">
       <div className="logo-container">
         <img src="images/example_iot_company_logo_mark.svg" />
+        <h1>Example</h1>
+        <h4>IoT Company</h4>
       </div>
 
-      <h2 style={{ textAlign: 'center' }}>Login HERE</h2>
+      <h2 style={{ textAlign: 'center' }}>Login</h2>
       {errorText && <MessageBox error text={errorText} />}
 
       <form onSubmit={onSubmit}>
@@ -62,6 +64,9 @@ const Login = ({ errorText, isAuthenticating, onSubmit }) => (
 
       <FlatButton label="Forgot password?" primary style={{ width: '100%' }} />
     </main>
+    <footer className="version">
+      Version 1.0.4
+    </footer>
   </div>
 );
 
