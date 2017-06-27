@@ -1,1 +1,0 @@
-{"file_dir": "public", "custom_api": "sample_api.lua", "modules": {"auth": "modules/util.lua", "listen": "modules/listen.lua"}, "event_handler": {"device": {"datapoint": "event_handler/product.lua"}, "timer": {"timer": "event_handler/timer.lua"}}, "custom_api_hook": "_init", "default_page": "index.html", "version": "0.2", "cors": {"origin": true}}
